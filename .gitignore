@@ -1,0 +1,11 @@
+__pycache__/
+app/__pycache__/
+app/core/__pycache__/
+app/ui_components/__pycache__/
+assets/
+build/
+dist/
+venv/
+
+
+*.spec
