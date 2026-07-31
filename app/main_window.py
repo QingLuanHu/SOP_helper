@@ -331,14 +331,26 @@ class MainWindow(QMainWindow):
         if not updates:
             self.right_view.set_html(f"<p style='color:#7f8c8d; font-size: 14pt;'>当前工站 <b>{self.current_station}</b> 暂无文档更新记录。</p>")
             return
-        try:
-            updates.sort(key=lambda x: x['date'], reverse=True)
-        except:
-            pass
+
+        # 日期解析辅助函数
+        from datetime import datetime
+        def parse_date(date_str):
+            if not date_str:
+                return datetime.min
+            for fmt in ("%Y.%m.%d", "%Y-%m-%d", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(date_str, fmt)
+                except ValueError:
+                    continue
+            # 若解析失败，返回一个极早时间，确保排到最后
+            return datetime.min
+
+        # 按日期降序排序（最新在前）
+        updates.sort(key=lambda x: parse_date(x['date']), reverse=True)
 
         html_parts = [f"<div style='font-family: Microsoft YaHei, sans-serif;'>",
-                      f"<h2 style='color: #2c3e50; margin-bottom: 15px;'>📢 {self.current_station} 动态推送</h2>",
-                      "<div style='display: flex; flex-direction: column; gap: 14px;'>"]
+                    f"<h2 style='color: #2c3e50; margin-bottom: 15px;'>📢 {self.current_station} 动态推送</h2>",
+                    "<div style='display: flex; flex-direction: column; gap: 14px;'>"]
         for update in updates:
             pdf_name = update['pdf_name']
             page = update['page']

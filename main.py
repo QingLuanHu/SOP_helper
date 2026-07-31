@@ -67,10 +67,10 @@ def check_single_instance():
 # ============================================================
 def main():
     
-    # 授权检查
-    if not check_license():
-        show_license_error()
-        return
+    # # 授权检查
+    # if not check_license():
+    #     show_license_error()
+    #     return
     
     # 有效期检查（软件到期时间）
     app = QApplication(sys.argv)
