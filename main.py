@@ -61,8 +61,8 @@ def main():
     app.setFont(font)
 
     # 1. 授权检查
-    # if not check_license():
-    #     show_license_error()
+    if not check_license():
+        show_license_error()
 
     # 2. 有效期检查
     if LicenseValidator.is_expired():

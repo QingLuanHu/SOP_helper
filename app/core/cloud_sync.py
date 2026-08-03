@@ -1,12 +1,20 @@
 # app/core/cloud_sync.py
 import json
+import sys
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 from PyQt5.QtWidgets import QMessageBox
 
-ASSETS_DIR = Path(__file__).parent.parent.parent / "assets"
+
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    else:
+        return Path(__file__).parent.parent.parent
+
+ASSETS_DIR = get_base_path() / "assets"
 VERSION_FILE = ASSETS_DIR / "version.json"
 
 def normalize_path(path: str) -> str:
@@ -86,20 +94,27 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
         updated_manifest["SoftwareVersion"] = remote_sw
         need_update = True
 
-    # 同步 embedded_assets
+    # 同步 embedded_assets（增加物理文件检查，不删除旧文件）
     local_ver = local_manifest.get("embedded_assets", "")
     remote_ver = cloud_manifest.get("embedded_assets", "")
-    if local_ver != remote_ver and remote_ver:
+
+    # ★ 检查本地数据文件是否存在
+    local_file_exists = False
+    if local_ver:
+        local_file = local_data_dir / f"embedded_assets_{local_ver}.py"
+        local_file_exists = local_file.exists()
+
+    # 条件：云端有版本（remote_ver非空）且（本地版本不同 或 本地文件缺失）
+    if remote_ver and (local_ver != remote_ver or not local_file_exists):
         remote_file = cloud_root_path / f"embedded_assets_{remote_ver}.py"
         if not remote_file.exists():
             if not silent:
                 QMessageBox.critical(None, "下载失败", f"云端文件不存在：{remote_file}")
             return False, "云端数据文件缺失"
         try:
+            # 直接复制（覆盖目标文件，若已存在则覆盖修复）
             shutil.copy2(str(remote_file), str(local_data_dir / f"embedded_assets_{remote_ver}.py"))
-            old_file = local_data_dir / f"embedded_assets_{local_ver}.py"
-            if old_file.exists() and old_file.name != f"embedded_assets_{remote_ver}.py":
-                old_file.unlink()
+            # ★ 不删除旧版本文件
             updated_manifest["embedded_assets"] = remote_ver
             need_update = True
         except Exception as e:
