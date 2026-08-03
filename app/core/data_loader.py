@@ -32,12 +32,12 @@ class DataLoader:
     def _load(self):
         base_dir = get_base_path()
         assets_dir = base_dir / "assets"
-        version_path = assets_dir / "version.txt"
+        version_path = assets_dir / "version.json"
 
         if version_path.exists():
             try:
                 with open(version_path, "r", encoding="utf-8") as f:
-                    version = f.read().strip()
+                    version = json.load(f).get("embedded_assets")
                 if version:
                     module_name = f"embedded_assets_{version}"
                     module_path = assets_dir / f"{module_name}.py"
@@ -176,12 +176,12 @@ class DataLoader:
     def check_update(self) -> bool:
         base_dir = get_base_path()
         assets_dir = base_dir / "assets"
-        version_path = assets_dir / "version.txt"
+        version_path = assets_dir / "version.json"
         if not version_path.exists():
             return False
         try:
             with open(version_path, "r", encoding="utf-8") as f:
-                new_version = f.read().strip()
+                new_version = json.load(f).get("embedded_assets")
             if not new_version or new_version == self._current_version:
                 return False
             print(f"🔄 检测到新版本数据: {new_version} (当前: {self._current_version})")
