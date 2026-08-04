@@ -20,8 +20,9 @@ from app.core.license_validator import LicenseValidator
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, software_version="2.0.2", parent=None):
+        super().__init__(parent)
+        self.software_version = software_version
         self.setWindowTitle("工位SOP助手 - 智能工站系统")
         self.setWindowIcon(self.create_icon())
         self.setGeometry(120, 80, 1280, 820)
@@ -53,8 +54,8 @@ class MainWindow(QMainWindow):
         self.search_index = []
         self.current_results = []
 
-        # 更新检查
-        self.update_checker = UpdateChecker(self)
+        # 更新检查（传入版本号）
+        self.update_checker = UpdateChecker(self, self.software_version)
 
         # UI组件
         self.top_bar = None
@@ -68,9 +69,11 @@ class MainWindow(QMainWindow):
         self.update_right_panel()
 
         QTimer.singleShot(200, self.sync_top_layout)
+
+        # 定时器：每小时静默同步（使用 update_checker）
         self.update_timer = QTimer(self)
-        self.update_timer.timeout.connect(self.check_data_update)
-        self.update_timer.start(3600 * 1000)
+        self.update_timer.timeout.connect(self._on_silent_sync)
+        self.update_timer.start(3600 * 1000)  # 1小时
 
     def init_ui(self):
         central_widget = QWidget()
@@ -129,7 +132,7 @@ class MainWindow(QMainWindow):
 
         self.refresh_btn = QPushButton("↻")
         self.refresh_btn.setFixedSize(24, 24)
-        self.refresh_btn.setToolTip("检查数据更新")
+        self.refresh_btn.setToolTip("检查并同步云端数据更新")
         self.refresh_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -141,7 +144,8 @@ class MainWindow(QMainWindow):
                 color: #3498db;
             }
         """)
-        self.refresh_btn.clicked.connect(self.on_refresh_clicked)
+        # 绑定手动刷新（非静默，带进度）
+        self.refresh_btn.clicked.connect(self._on_refresh_clicked)
         version_layout.addWidget(self.refresh_btn)
 
         self.statusBar().addPermanentWidget(version_widget)
@@ -173,6 +177,7 @@ class MainWindow(QMainWindow):
     # ---------- 登录/退出 ----------
     def toggle_login(self):
         if self.logged_in:
+            # 退出登录
             self.logged_in = False
             self.current_user = ""
             self.top_bar.user_label.setText("👤 未登录")
@@ -180,6 +185,11 @@ class MainWindow(QMainWindow):
             self.top_bar.login_btn.setText("登录")
             if self.top_bar.exam_toggle.isChecked():
                 self.top_bar.exam_toggle.setChecked(False)
+            # 重置工站为第一个
+            if self.all_stations:
+                self.current_station = self.all_stations[0]
+            else:
+                self.current_station = "无工站"
             self.refresh_left_list()
             self.update_right_panel()
             self.statusBar().showMessage("已退出")
@@ -193,11 +203,14 @@ class MainWindow(QMainWindow):
                     self.top_bar.user_label.setText(f"👤 {username} (已登录)")
                     self.top_bar.user_label.setStyleSheet("font-weight: bold; color: #2c3e50; font-size: 12pt;")
                     self.top_bar.login_btn.setText("退出")
+                    # 同步当前工站为下拉框选中的值
+                    self.current_station = self.top_bar.station_combo.currentText()
+                    # 调用工站切换方法以刷新界面
+                    self.on_station_changed(self.current_station)
                     self.statusBar().showMessage(f"欢迎, {username}")
-                    self.refresh_left_list()
-                    self.update_right_panel()
                     if self.top_bar.exam_toggle.isChecked():
                         self.top_bar.exam_toggle.setChecked(False)
+
 
     # ---------- 工站/分类 ----------
     def on_station_changed(self, station_name):
@@ -342,10 +355,8 @@ class MainWindow(QMainWindow):
                     return datetime.strptime(date_str, fmt)
                 except ValueError:
                     continue
-            # 若解析失败，返回一个极早时间，确保排到最后
             return datetime.min
 
-        # 按日期降序排序（最新在前）
         updates.sort(key=lambda x: parse_date(x['date']), reverse=True)
 
         html_parts = [f"<div style='font-family: Microsoft YaHei, sans-serif;'>",
@@ -807,16 +818,48 @@ class MainWindow(QMainWindow):
         else:
             self.open_pdf_by_name(pdf_name, 1, "")
 
-    # ---------- 版本和更新 ----------
+    # ---------- 版本和更新（新方案） ----------
     def update_version_label(self):
         version = DATA_LOADER.get_current_version()
         self.version_label.setText(f"Version: {version}" if version else "Version: 开发模式")
 
-    def check_data_update(self, show_no_update=False):
-        self.update_checker.check_data_update(show_no_update)
+    def refresh_after_sync(self):
+        """
+        在云同步成功后调用，强制 DataLoader 重新加载数据，并刷新所有界面组件。
+        """
+        # 强制 DataLoader 重新从文件加载（因为可能已更新 assets 目录）
+        DATA_LOADER._load()   # 重新加载资产
 
-    def on_refresh_clicked(self):
-        self.check_data_update(show_no_update=True)
+        # 重新获取所有数据
+        self.knowledge_data = DATA_LOADER.get_knowledge_graph()
+        self.station_to_pdfs = DATA_LOADER.get_station_to_pdfs()
+        self.file_categories = DATA_LOADER.get_file_categories()
+        self.all_stations = DATA_LOADER.get_all_stations()
+
+        docs = self.knowledge_data.get("documents", [])
+        self.pdf_to_doc = {doc.get("pdf_name", ""): True for doc in docs if doc.get("pdf_name")}
+
+        # 更新工站下拉框
+        self.top_bar.set_stations(self.all_stations)
+        if self.all_stations:
+            self.current_station = self.all_stations[0]
+        else:
+            self.current_station = "无工站"
+
+        # 刷新界面
+        self.refresh_left_list()
+        self.update_right_panel()
+        self.update_version_label()
+        self.statusBar().showMessage("数据已刷新")
+
+    # ---------- 定时与手动同步槽函数 ----------
+    def _on_silent_sync(self):
+        """每小时静默同步（无弹窗，不打扰用户）"""
+        self.update_checker.check_data_update(silent=True)
+
+    def _on_refresh_clicked(self):
+        """手动点击刷新按钮：执行完整同步（含进度弹窗），并显示提示"""
+        self.update_checker.check_data_update(show_no_update=True, silent=False)
 
     # ---------- 图标 ----------
     def create_icon(self):

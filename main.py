@@ -99,27 +99,24 @@ def main():
         msg.exec_()
         sys.exit(0)
 
-    # ====== 2. 云同步（同步 version.json + 数据文件，返回 cloud_root） ======
+    # ====== 2. 云同步（同步 version.json + 数据文件 + sequence.dat，返回 cloud_root） ======
     ok, cloud_root = sync_cloud(SOFTWARE_VERSION, silent=False)
 
-    # ====== 3. 从云端复制 sequence.dat 覆盖本地（无痕续期） ======
-    if cloud_root:
-        sync_license_file(cloud_root)  # 静默执行
 
-    # ====== 4. 软件版本校验（阻断式） ======
+    # ====== 3. 软件版本校验（阻断式） ======
     if not check_software_version():
         sys.exit(1)
 
-    # ====== 5. 授权检查 ======
-    # 5a. 固定 License（可根据需要启用）
+    # ====== 4. 授权检查 ======
+    # 4a. 固定 License
     if not check_license():
         show_license_error()
 
-    # 5b. 有效期校验（此时 sequence.dat 已被云端最新覆盖）
+    # 4b. 有效期校验
     if LicenseValidator.is_expired():
         LicenseValidator.prompt_for_license()
 
-    # ====== 6. 加载进度弹窗 ======
+    # ====== 5. 加载进度弹窗 ======
     progress = QProgressDialog("加载数据中，请稍候...", "取消", 0, 0, None)
     progress.setWindowTitle("工位SOP助手")
     progress.setWindowModality(Qt.WindowModal)
@@ -130,7 +127,7 @@ def main():
     progress.show()
     app.processEvents()
 
-    # ====== 7. 数据加载 + 主窗口 ======
+    # ====== 6. 数据加载 + 主窗口 ======
     def load_data():
         try:
             from app.core.data_loader import DATA_LOADER
@@ -151,18 +148,6 @@ def main():
             window.activateWindow()
             app.main_window = window
 
-            # ====== 每小时静默检查更新 ======
-            from app.core.cloud_sync import sync_cloud, sync_license_file
-
-            def hourly_sync():
-                ok, new_cloud_root = sync_cloud(SOFTWARE_VERSION, silent=True)
-                if ok and new_cloud_root:
-                    sync_license_file(new_cloud_root)
-
-            timer = QTimer()
-            timer.timeout.connect(hourly_sync)
-            timer.start(60 * 60 * 1000)  # 1小时
-            app._cloud_timer = timer
 
         except Exception as e:
             traceback.print_exc()

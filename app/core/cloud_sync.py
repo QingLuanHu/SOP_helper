@@ -4,7 +4,8 @@ import sys
 import shutil
 from pathlib import Path
 from typing import Optional, Tuple
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QMessageBox, QProgressDialog, QApplication
+from PyQt5.QtCore import Qt
 
 
 def get_base_path():
@@ -54,15 +55,10 @@ def sync_license_file(cloud_root: str) -> bool:
     cloud_seq = cloud_root_path / "sequence.dat"
     local_seq = ASSETS_DIR / "sequence.dat"
 
-    # 云端文件不存在 → 跳过
     if not cloud_seq.exists():
         return False
-
-    # 云端文件大小为 0 → 跳过
     if cloud_seq.stat().st_size == 0:
         return False
-
-    # 本地已有且大小与云端一致 → 跳过（避免无效写入）
     if local_seq.exists() and local_seq.stat().st_size > 0:
         if local_seq.stat().st_size == cloud_seq.stat().st_size:
             return True
@@ -70,7 +66,6 @@ def sync_license_file(cloud_root: str) -> bool:
     try:
         local_seq.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(cloud_seq), str(local_seq))
-        # 验证复制结果
         if not local_seq.exists() or local_seq.stat().st_size == 0:
             print(f"[云同步] 复制 sequence.dat 后文件为空，保留原有授权")
             return False
@@ -81,6 +76,10 @@ def sync_license_file(cloud_root: str) -> bool:
 
 
 def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool, str]:
+    """
+    执行云同步，返回 (是否成功, 消息)
+    若 silent=False 且需要拷贝文件，会显示进度对话框
+    """
     local_manifest = read_local_manifest()
     if local_manifest is None:
         if not silent:
@@ -118,13 +117,15 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
 
     need_update = False
     updated_manifest = local_manifest.copy()
+    need_copy_data = False
+    need_copy_license = False
 
     # ---- 1. 同步 CloudBasePath ----
     local_path = normalize_path(local_manifest.get("CloudBasePath", ""))
     remote_path = normalize_path(cloud_manifest.get("CloudBasePath", ""))
     if local_path != remote_path and remote_path:
         updated_manifest["CloudBasePath"] = cloud_manifest["CloudBasePath"]
-        cloud_root = remote_path          # 更新 cloud_root 为新路径
+        cloud_root = remote_path
         cloud_root_path = Path(cloud_root)
         need_update = True
 
@@ -135,17 +136,15 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
         updated_manifest["SoftwareVersion"] = remote_sw
         need_update = True
 
-    # ---- 3. 同步 embedded_assets（数据文件，不删除旧文件） ----
+    # ---- 3. 同步 embedded_assets ----
     local_ver = local_manifest.get("embedded_assets", "")
     remote_ver = cloud_manifest.get("embedded_assets", "")
 
-    # 检查本地数据文件是否存在（防止文件被意外删除）
     local_file_exists = False
     if local_ver:
         local_file = local_data_dir / f"embedded_assets_{local_ver}.py"
         local_file_exists = local_file.exists()
 
-    # 若云端有版本，且（本地版本不同 或 本地文件缺失），则从云端复制
     if remote_ver and (local_ver != remote_ver or not local_file_exists):
         remote_file = cloud_root_path / f"embedded_assets_{remote_ver}.py"
         if not remote_file.exists():
@@ -153,39 +152,69 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
                 QMessageBox.critical(None, "下载失败", f"云端文件不存在：{remote_file}")
             return False, "云端数据文件缺失"
 
-        # 检查云端文件大小
         if remote_file.stat().st_size == 0:
             if not silent:
                 QMessageBox.critical(None, "下载失败", f"云端文件大小为 0，可能已损坏：{remote_file}")
             return False, "云端数据文件损坏"
 
-        try:
+        need_copy_data = True
+
+    # ---- 4. 检查是否需要拷贝 sequence.dat ----
+    cloud_seq = cloud_root_path / "sequence.dat"
+    local_seq = ASSETS_DIR / "sequence.dat"
+    if cloud_seq.exists() and cloud_seq.stat().st_size > 0:
+        if not local_seq.exists() or local_seq.stat().st_size != cloud_seq.stat().st_size:
+            need_copy_license = True
+
+    # ---- 5. 显示进度对话框（如果需要） ----
+    progress_dialog = None
+    if not silent and (need_copy_data or need_copy_license):
+        progress_dialog = QProgressDialog("正在从云端同步数据，请稍候…", None, 0, 0, None)
+        progress_dialog.setWindowTitle("云同步")
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setCancelButton(None)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.show()
+        QApplication.processEvents()
+
+    try:
+        # ---- 复制数据文件 ----
+        if need_copy_data:
+            if progress_dialog:
+                progress_dialog.setLabelText("正在复制数据文件…")
+                QApplication.processEvents()
             local_target = local_data_dir / f"embedded_assets_{remote_ver}.py"
             shutil.copy2(str(remote_file), str(local_target))
-            # 验证复制结果
             if not local_target.exists() or local_target.stat().st_size == 0:
                 if not silent:
                     QMessageBox.critical(None, "复制失败", f"复制后文件损坏或为空：{local_target}")
                 if local_target.exists():
                     local_target.unlink()
                 return False, "数据文件复制失败"
-
             updated_manifest["embedded_assets"] = remote_ver
             need_update = True
-        except Exception as e:
-            if not silent:
-                QMessageBox.critical(None, "复制失败", f"无法复制新数据文件：{e}")
-            return False, "数据文件复制失败"
 
-    # ---- 4. 保存更新后的本地 version.json（包含 CloudBasePath/SoftwareVersion/embedded_assets） ----
+        # ---- 复制授权文件 ----
+        if need_copy_license:
+            if progress_dialog:
+                progress_dialog.setLabelText("正在更新授权文件…")
+                QApplication.processEvents()
+            local_seq.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(cloud_seq), str(local_seq))
+            if not local_seq.exists() or local_seq.stat().st_size == 0:
+                print(f"[云同步] 复制 sequence.dat 后文件为空，保留原有授权")
+                # 不报错，继续
+
+    finally:
+        if progress_dialog:
+            progress_dialog.close()
+            QApplication.processEvents()
+
+    # ---- 保存更新后的本地 version.json ----
     if need_update:
         write_local_manifest(updated_manifest)
 
-    # ---- 5. ★ 从云端复制 sequence.dat 覆盖本地（无痕续期） ★ ----
-    # 使用更新后的 cloud_root（可能已随 CloudBasePath 变化）
-    sync_license_file(cloud_root)
-
-    # ---- 6. 软件版本校验（阻断式） ----
+    # ---- 软件版本校验（阻断式） ----
     local_sw_after = updated_manifest.get("SoftwareVersion", "")
     if local_sw_after != local_software_version:
         if not silent:
