@@ -1,4 +1,5 @@
 # app/core/cloud_sync.py
+
 import json
 import sys
 import shutil
@@ -45,12 +46,7 @@ def write_local_manifest(manifest: dict):
 
 
 def sync_license_file(cloud_root: str) -> bool:
-    """
-    从云端复制 sequence.dat 到本地 assets/（静默，不弹窗）
-    云端路径：{cloud_root}/sequence.dat
-    本地路径：assets/sequence.dat
-    返回 True 表示复制成功或无需复制，False 表示复制失败（已静默处理）
-    """
+    """静默复制 sequence.dat（已有大小比较，仅当不同时复制）"""
     cloud_root_path = Path(cloud_root)
     cloud_seq = cloud_root_path / "sequence.dat"
     local_seq = ASSETS_DIR / "sequence.dat"
@@ -76,10 +72,6 @@ def sync_license_file(cloud_root: str) -> bool:
 
 
 def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool, str]:
-    """
-    执行云同步，返回 (是否成功, 消息)
-    若 silent=False 且需要拷贝文件，会显示进度对话框
-    """
     local_manifest = read_local_manifest()
     if local_manifest is None:
         if not silent:
@@ -117,8 +109,6 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
 
     need_update = False
     updated_manifest = local_manifest.copy()
-    need_copy_data = False
-    need_copy_license = False
 
     # ---- 1. 同步 CloudBasePath ----
     local_path = normalize_path(local_manifest.get("CloudBasePath", ""))
@@ -136,85 +126,69 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
         updated_manifest["SoftwareVersion"] = remote_sw
         need_update = True
 
-    # ---- 3. 同步 embedded_assets ----
-    local_ver = local_manifest.get("embedded_assets", "")
+    # ---- 3. 同步 embedded_assets（优先检查本地文件是否存在） ----
     remote_ver = cloud_manifest.get("embedded_assets", "")
+    if remote_ver:
+        local_target = local_data_dir / f"embedded_assets_{remote_ver}.py"
 
-    local_file_exists = False
-    if local_ver:
-        local_file = local_data_dir / f"embedded_assets_{local_ver}.py"
-        local_file_exists = local_file.exists()
-
-    if remote_ver and (local_ver != remote_ver or not local_file_exists):
-        remote_file = cloud_root_path / f"embedded_assets_{remote_ver}.py"
-        if not remote_file.exists():
-            if not silent:
-                QMessageBox.critical(None, "下载失败", f"云端文件不存在：{remote_file}")
-            return False, "云端数据文件缺失"
-
-        if remote_file.stat().st_size == 0:
-            if not silent:
-                QMessageBox.critical(None, "下载失败", f"云端文件大小为 0，可能已损坏：{remote_file}")
-            return False, "云端数据文件损坏"
-
-        need_copy_data = True
-
-    # ---- 4. 检查是否需要拷贝 sequence.dat ----
-    cloud_seq = cloud_root_path / "sequence.dat"
-    local_seq = ASSETS_DIR / "sequence.dat"
-    if cloud_seq.exists() and cloud_seq.stat().st_size > 0:
-        if not local_seq.exists() or local_seq.stat().st_size != cloud_seq.stat().st_size:
-            need_copy_license = True
-
-    # ---- 5. 显示进度对话框（如果需要） ----
-    progress_dialog = None
-    if not silent and (need_copy_data or need_copy_license):
-        progress_dialog = QProgressDialog("正在从云端同步数据，请稍候…", None, 0, 0, None)
-        progress_dialog.setWindowTitle("云同步")
-        progress_dialog.setWindowModality(Qt.WindowModal)
-        progress_dialog.setCancelButton(None)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.show()
-        QApplication.processEvents()
-
-    try:
-        # ---- 复制数据文件 ----
-        if need_copy_data:
-            if progress_dialog:
-                progress_dialog.setLabelText("正在复制数据文件…")
-                QApplication.processEvents()
-            local_target = local_data_dir / f"embedded_assets_{remote_ver}.py"
-            shutil.copy2(str(remote_file), str(local_target))
-            if not local_target.exists() or local_target.stat().st_size == 0:
+        # ★ 关键修复：若目标文件已存在且不为空，则直接跳过复制，仅更新 manifest
+        if local_target.exists() and local_target.stat().st_size > 0:
+            # 文件存在，确保 manifest 中的版本记录正确
+            if local_manifest.get("embedded_assets", "") != remote_ver:
+                updated_manifest["embedded_assets"] = remote_ver
+                need_update = True
+            # 不执行复制
+        else:
+            # 文件不存在或为空，需要从云端复制
+            remote_file = cloud_root_path / f"embedded_assets_{remote_ver}.py"
+            if not remote_file.exists():
                 if not silent:
-                    QMessageBox.critical(None, "复制失败", f"复制后文件损坏或为空：{local_target}")
-                if local_target.exists():
-                    local_target.unlink()
-                return False, "数据文件复制失败"
-            updated_manifest["embedded_assets"] = remote_ver
-            need_update = True
+                    QMessageBox.critical(None, "下载失败", f"云端文件不存在：{remote_file}")
+                return False, "云端数据文件缺失"
+            if remote_file.stat().st_size == 0:
+                if not silent:
+                    QMessageBox.critical(None, "下载失败", f"云端文件大小为 0，可能已损坏：{remote_file}")
+                return False, "云端数据文件损坏"
 
-        # ---- 复制授权文件 ----
-        if need_copy_license:
-            if progress_dialog:
-                progress_dialog.setLabelText("正在更新授权文件…")
+            # 显示进度（仅非静默）
+            progress_dialog = None
+            if not silent:
+                progress_dialog = QProgressDialog("正在从云端同步数据，请稍候…", None, 0, 0, None)
+                progress_dialog.setWindowTitle("云同步")
+                progress_dialog.setWindowModality(Qt.WindowModal)
+                progress_dialog.setCancelButton(None)
+                progress_dialog.setMinimumDuration(0)
+                progress_dialog.show()
                 QApplication.processEvents()
-            local_seq.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(cloud_seq), str(local_seq))
-            if not local_seq.exists() or local_seq.stat().st_size == 0:
-                print(f"[云同步] 复制 sequence.dat 后文件为空，保留原有授权")
-                # 不报错，继续
 
-    finally:
-        if progress_dialog:
-            progress_dialog.close()
-            QApplication.processEvents()
+            try:
+                shutil.copy2(str(remote_file), str(local_target))
+                if not local_target.exists() or local_target.stat().st_size == 0:
+                    if not silent:
+                        QMessageBox.critical(None, "复制失败", f"复制后文件损坏或为空：{local_target}")
+                    if local_target.exists():
+                        local_target.unlink()
+                    return False, "数据文件复制失败"
 
-    # ---- 保存更新后的本地 version.json ----
+                updated_manifest["embedded_assets"] = remote_ver
+                need_update = True
+            except Exception as e:
+                if not silent:
+                    QMessageBox.critical(None, "复制失败", f"无法复制新数据文件：{e}")
+                return False, "数据文件复制失败"
+            finally:
+                if progress_dialog:
+                    progress_dialog.close()
+                    QApplication.processEvents()
+
+    # ---- 4. 复制 sequence.dat（静默，已有大小比较） ----
+    sync_license_file(str(cloud_root_path))
+
+    # ---- 5. 保存更新后的本地 version.json ----
     if need_update:
         write_local_manifest(updated_manifest)
 
-    # ---- 软件版本校验（阻断式） ----
+    # ---- 6. 软件版本校验（阻断式） ----
     local_sw_after = updated_manifest.get("SoftwareVersion", "")
     if local_sw_after != local_software_version:
         if not silent:
