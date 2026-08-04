@@ -21,8 +21,9 @@ VERSION_FILE = ASSETS_DIR / "version.json"
 
 
 def normalize_path(path: str) -> str:
-    if not path:
-        return path
+    # ★ 修复：空白输入返回空字符串
+    if not path or not path.strip():
+        return ""
     path = path.strip().replace('/', '\\')
     if path.startswith('\\\\') or (len(path) >= 3 and path[1] == ':' and path[2] == '\\'):
         return path
@@ -46,7 +47,6 @@ def write_local_manifest(manifest: dict):
 
 
 def sync_license_file(cloud_root: str) -> bool:
-    """静默复制 sequence.dat（已有大小比较，仅当不同时复制）"""
     cloud_root_path = Path(cloud_root)
     cloud_seq = cloud_root_path / "sequence.dat"
     local_seq = ASSETS_DIR / "sequence.dat"
@@ -110,10 +110,10 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
     need_update = False
     updated_manifest = local_manifest.copy()
 
-    # ---- 1. 同步 CloudBasePath ----
+    # ---- 1. 同步 CloudBasePath（★ 修复：仅当 remote_path 非空且不同时更新） ----
     local_path = normalize_path(local_manifest.get("CloudBasePath", ""))
     remote_path = normalize_path(cloud_manifest.get("CloudBasePath", ""))
-    if local_path != remote_path and remote_path:
+    if remote_path and local_path != remote_path:
         updated_manifest["CloudBasePath"] = cloud_manifest["CloudBasePath"]
         cloud_root = remote_path
         cloud_root_path = Path(cloud_root)
@@ -131,15 +131,11 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
     if remote_ver:
         local_target = local_data_dir / f"embedded_assets_{remote_ver}.py"
 
-        # ★ 关键修复：若目标文件已存在且不为空，则直接跳过复制，仅更新 manifest
         if local_target.exists() and local_target.stat().st_size > 0:
-            # 文件存在，确保 manifest 中的版本记录正确
             if local_manifest.get("embedded_assets", "") != remote_ver:
                 updated_manifest["embedded_assets"] = remote_ver
                 need_update = True
-            # 不执行复制
         else:
-            # 文件不存在或为空，需要从云端复制
             remote_file = cloud_root_path / f"embedded_assets_{remote_ver}.py"
             if not remote_file.exists():
                 if not silent:
@@ -150,7 +146,6 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
                     QMessageBox.critical(None, "下载失败", f"云端文件大小为 0，可能已损坏：{remote_file}")
                 return False, "云端数据文件损坏"
 
-            # 显示进度（仅非静默）
             progress_dialog = None
             if not silent:
                 progress_dialog = QProgressDialog("正在从云端同步数据，请稍候…", None, 0, 0, None)
@@ -181,14 +176,14 @@ def sync_cloud(local_software_version: str, silent: bool = False) -> Tuple[bool,
                     progress_dialog.close()
                     QApplication.processEvents()
 
-    # ---- 4. 复制 sequence.dat（静默，已有大小比较） ----
+    # ---- 4. 复制 sequence.dat ----
     sync_license_file(str(cloud_root_path))
 
     # ---- 5. 保存更新后的本地 version.json ----
     if need_update:
         write_local_manifest(updated_manifest)
 
-    # ---- 6. 软件版本校验（阻断式） ----
+    # ---- 6. 软件版本校验 ----
     local_sw_after = updated_manifest.get("SoftwareVersion", "")
     if local_sw_after != local_software_version:
         if not silent:
