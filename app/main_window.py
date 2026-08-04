@@ -415,7 +415,7 @@ class MainWindow(QMainWindow):
             self.update_right_panel()
             self.refresh_left_list()
 
-    def load_quiz_for_pdf(self, pdf_name):
+    def load_quiz_for_pdf(self, pdf_name, force_submitted=False):
         self.right_quiz.clear_quiz()
         self.right_quiz.enable_buttons(False)
         self.right_quiz.enable_submit(False)
@@ -455,9 +455,11 @@ class MainWindow(QMainWindow):
         self.quiz_pdf_name = normalized_name
         self.quiz_version = version
 
+        # 从记录中获取数据
         record = self.quiz_records.get(normalized_name, {})
         score = record.get("score", 0)
-        submitted = record.get("submitted", False)
+        # 如果 force_submitted 为 True，强制认为已提交（用于提交后刷新）
+        submitted = record.get("submitted", False) or force_submitted
         saved_answers = record.get("answers", [])
 
         if score > 0:
@@ -468,6 +470,7 @@ class MainWindow(QMainWindow):
 
         self.render_quiz(questions, submitted=submitted, saved_answers=saved_answers)
 
+        # 恢复已保存的答案（仅当记录中有且未提交时才恢复，提交后应保留显示）
         if saved_answers and len(saved_answers) == len(self.quiz_answer_widgets):
             for idx, ans in enumerate(saved_answers):
                 if not ans:
@@ -482,8 +485,9 @@ class MainWindow(QMainWindow):
                     for i, btn in enumerate(item['widgets']):
                         btn.setChecked(chr(65 + i) in ans)
 
-        self.right_quiz.enable_submit(True)
+        self.right_quiz.enable_submit(not submitted)  # 已提交则禁用提交按钮
         self.right_quiz.enable_buttons(True)
+
 
     def render_quiz(self, questions, submitted=False, saved_answers=None):
         from PyQt5.QtWidgets import QGroupBox, QRadioButton, QCheckBox, QButtonGroup, QVBoxLayout, QLabel
@@ -625,6 +629,7 @@ class MainWindow(QMainWindow):
         correct = 0
         wrong_questions = []
 
+        # ---------- 收集用户答案并计算得分 ----------
         user_answers = []
         for idx, item in enumerate(self.quiz_answer_widgets):
             if item['type'] == 'single':
@@ -634,31 +639,37 @@ class MainWindow(QMainWindow):
                 selected_indices = [i for i, cb in enumerate(item['widgets']) if cb.isChecked()]
                 ans = ''.join(chr(65 + i) for i in sorted(selected_indices)) if selected_indices else ""
             user_answers.append(ans)
+            # 判断对错
             if ans == item['answer']:
                 correct += 1
             else:
-                if ans:
-                    wrong_questions.append(str(idx + 1))
-                else:
-                    wrong_questions.append(str(idx + 1))
+                wrong_questions.append(str(idx + 1))
 
         score_percent = int(correct / total * 100) if total > 0 else 0
         score_str = f"{correct}/{total}"
 
+        # ---------- 更新记录（直接操作 self.quiz_records） ----------
         if self.quiz_pdf_name:
-            self.quiz_manager.update_record(
-                self.quiz_pdf_name,
-                self.quiz_version,
-                user_answers,
-                score_percent,
-                submitted=True
-            )
+            record = self.quiz_records.get(self.quiz_pdf_name, {})
+            record["version"] = self.quiz_version
+            record["answers"] = user_answers
+            record["score"] = score_percent
+            record["submitted"] = True
+            record["timestamp"] = datetime.now().isoformat()
+            self.quiz_records[self.quiz_pdf_name] = record
+            self.quiz_manager.save_records()  # 保存到文件
+            # 写入 personnel_data.xlsx
             self.save_quiz_record(self.current_user, self.quiz_pdf_name, self.quiz_version, score_str, wrong_questions)
 
+        # ---------- 更新界面 ----------
         color = QuizManager.score_to_color(score_percent)
         self.right_quiz.set_score(score_percent, color)
         self.right_quiz.enable_submit(False)
-        self.load_quiz_for_pdf(self.quiz_pdf_name)
+
+        # 重新加载题库以显示正确答案（传入 submitted=True）
+        if self.quiz_pdf_name:
+            self.load_quiz_for_pdf(self.quiz_pdf_name, force_submitted=True)
+
         self.refresh_left_list()
 
     def save_quiz_record(self, user, quiz_name, version, score, wrong_questions):
